@@ -1,0 +1,16 @@
+cameras:
+  - url: "rtsp://localhost:8554/cam1" # Replace with actual RTSP URL or video path
+  - url: "rtsp://localhost:8554/cam2" # Replace with actual RTSP URL or video path
+
+# Region of interest for counting in the stitched image (polygon coordinates)
+# [x, y]
+region_of_interest:
+  - [100, 100]
+  - [800, 100]
+  - [800, 600]
+  - [100, 600]
+
+# Display settings
+display:
+  width: 1280
+  height: 720
