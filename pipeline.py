@@ -47,9 +47,10 @@ class StitchingPipeline:
 
         self.pipeline_model = TwoViewPipeline(conf).to(self.device).eval()
         self.homography = None
+        self.fov = 80
 
         # Setup YOLOv8 for person detection
-        self.yolo_model = YOLO("yolov8n.pt")
+        self.yolo_model = YOLO("yolo26n.pt")
         self.yolo_model.to(self.device)
 
     def calculate_homography(self, frame1, frame2):
@@ -80,18 +81,39 @@ class StitchingPipeline:
         else:
             return False
 
+    def cylindrical_warp(self, img, fov):
+        if fov <= 0:
+            return img
+        h, w = img.shape[:2]
+        f = w / (2 * np.tan(np.radians(fov) / 2))
+        
+        x, y = np.meshgrid(np.arange(w), np.arange(h))
+        x_c = x - w / 2
+        y_c = y - h / 2
+        
+        x_orig = f * np.tan(x_c / f) + w / 2
+        y_orig = y_c / np.cos(x_c / f) + h / 2
+        
+        map_x = x_orig.astype(np.float32)
+        map_y = y_orig.astype(np.float32)
+        
+        warped = cv2.remap(img, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        return warped
+
     def stitch_frames(self, frame1, frame2):
+        warp1 = self.cylindrical_warp(frame1, self.fov)
+        warp2 = self.cylindrical_warp(frame2, self.fov)
+
         if self.homography is None:
             # We must calculate Homography
-            success = self.calculate_homography(frame1, frame2)
+            success = self.calculate_homography(warp1, warp2)
             if not success:
-                return frame1 # Fallback, return frame 1 if unable to stitch
+                return warp1 # Fallback, return frame 1 if unable to stitch
 
-        h1, w1 = frame1.shape[:2]
-        h2, w2 = frame2.shape[:2]
+        h1, w1 = warp1.shape[:2]
+        h2, w2 = warp2.shape[:2]
 
         # Using computed homography to warp frame2 to frame1 space
-        # Here we do a simple stitching where we combine the images.
         # Determine the canvas size
         pts1 = np.float32([[0, 0], [0, h1], [w1, h1], [w1, 0]]).reshape(-1, 1, 2)
         pts2 = np.float32([[0, 0], [0, h2], [w2, h2], [w2, 0]]).reshape(-1, 1, 2)
@@ -100,22 +122,41 @@ class StitchingPipeline:
             pts = np.concatenate((pts1, pts2_), axis=0)
             [xmin, ymin] = np.int32(pts.min(axis=0).ravel() - 0.5)
             [xmax, ymax] = np.int32(pts.max(axis=0).ravel() + 0.5)
+            
+            # Limit maximum size to prevent Out of Memory in extreme conditions
+            MAX_WIDTH = 4000
+            MAX_HEIGHT = 2000
+            if (xmax - xmin) > MAX_WIDTH:
+                if xmin < 0: xmin = max(xmin, xmax - MAX_WIDTH)
+                else: xmax = min(xmax, xmin + MAX_WIDTH)
+            if (ymax - ymin) > MAX_HEIGHT:
+                if ymin < 0: ymin = max(ymin, ymax - MAX_HEIGHT)
+                else: ymax = min(ymax, ymin + MAX_HEIGHT)
 
             t = [-xmin, -ymin]
             Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])
 
-            result = cv2.warpPerspective(frame2, Ht.dot(self.homography), (xmax-xmin, ymax-ymin))
-            result[t[1]:h1+t[1], t[0]:w1+t[0]] = frame1
+            result = cv2.warpPerspective(warp2, Ht.dot(self.homography), (xmax-xmin, ymax-ymin))
+            
+            # Create a mask to place warp1 over result, ignoring the black borders of cylindrical warp
+            mask = np.any(warp1 > 0, axis=2).astype(np.uint8) * 255
+            roi = result[t[1]:h1+t[1], t[0]:w1+t[0]]
+            
+            mask_inv = cv2.bitwise_not(mask)
+            roi_bg = cv2.bitwise_and(roi, roi, mask=mask_inv)
+            warp1_fg = cv2.bitwise_and(warp1, warp1, mask=mask)
+            
+            result[t[1]:h1+t[1], t[0]:w1+t[0]] = cv2.add(roi_bg, warp1_fg)
             return result
         except Exception as e:
             print(f"Homography error: {e}")
-            return frame1
+            return warp1
 
     def detect_and_count(self, image, polygon):
-        """
-        Runs YOLOv8 person detection and counts people within the polygon.
-        """
-        results = self.yolo_model(image, classes=[0], verbose=False) # 0 is person class in COCO
+        if not polygon:
+            return image.copy(), 0
+
+        results = self.yolo_model(image, classes=[0], verbose=False)
 
         count = 0
         img_with_boxes = image.copy()
@@ -131,8 +172,8 @@ class StitchingPipeline:
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
 
                 # Check if center of the box is inside the polygon
-                cx = (x1 + x2) // 2
-                cy = (y1 + y2) // 2
+                cx = int((x1 + x2) // 2)
+                cy = int((y1 + y2) // 2)
 
                 # cv2.pointPolygonTest returns > 0 if inside, 0 if on contour, < 0 if outside
                 if cv2.pointPolygonTest(pts, (cx, cy), False) >= 0:
@@ -142,7 +183,7 @@ class StitchingPipeline:
                     color = (0, 0, 255) # Red for outside
 
                 # Draw bounding box and center point
-                cv2.rectangle(img_with_boxes, (x1, y1), (x2, y2), color, 2)
+                cv2.rectangle(img_with_boxes, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
                 cv2.circle(img_with_boxes, (cx, cy), 3, color, -1)
 
         return img_with_boxes, count

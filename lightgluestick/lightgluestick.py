@@ -143,7 +143,7 @@ class Attention(nn.Module):
             s = q.shape[-1] ** -0.5
             sim = torch.einsum("...id,...jd->...ij", q, k) * s
             if mask is not None:
-                sim.masked_fill(~mask, -float("inf"))
+                sim = sim.masked_fill(~mask, -float("inf"))
             attn = F.softmax(sim, -1)
             return torch.einsum("...ij,...jd->...id", attn, v)
 
@@ -515,7 +515,9 @@ class LightGlueStick(BaseModel):
             ),
         )
 
-        self.eye_mask = torch.eye(self.conf.max_num_lines * 2, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+        self.register_buffer(
+            "eye_mask", torch.eye(self.conf.max_num_lines * 2, dtype=torch.float32).unsqueeze(0)
+        )
         state_dict = None
 
         if conf.weights is not None:
