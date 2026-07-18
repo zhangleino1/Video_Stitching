@@ -1,8 +1,9 @@
 import os
 import sys
+import time
 
 import cv2
-from PyQt5.QtCore import QPointF, QRectF, QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QPointF, QRectF, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -25,6 +26,7 @@ from PyQt5.QtWidgets import (
 
 from calibration import CalibrationProject
 from fusion import MultiCameraFusion
+from fusion_worker import FrameStore, FusionWorker
 from video_thread import VideoThread
 
 
@@ -263,16 +265,17 @@ class MainWindow(QMainWindow):
         self.frames = {}
         self.frozen_frames = {}
         self.registration_thread = None
-        self.mosaic_dirty = False
         self.current_camera_index = 0
         self._loading_camera = False
+        self._last_preview_ts = 0.0
         self.init_ui()
         self.load_styles()
         self.load_camera_to_ui(0)
-        self.mosaic_timer = QTimer(self)
-        self.mosaic_timer.setInterval(200)
-        self.mosaic_timer.timeout.connect(self.flush_mosaic_refresh)
-        self.mosaic_timer.start()
+        # mosaic 融合完全在 worker 线程进行，主线程只负责显示
+        self.frame_store = FrameStore()
+        self.fusion_worker = FusionWorker(self.frame_store, self.project)
+        self.fusion_worker.mosaic_ready.connect(self.on_mosaic_ready)
+        self.fusion_worker.start()
 
     def load_styles(self):
         try:
@@ -354,13 +357,14 @@ class MainWindow(QMainWindow):
         bottom_layout = QHBoxLayout()
         table_group = QGroupBox("当前相机标定点")
         table_layout = QVBoxLayout()
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["图像 X", "图像 Y", "本地 X（米）", "本地 Y（米）", ""])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["图像 X", "图像 Y", "本地 X（米）", "本地 Y（米）", "残差（cm）", ""])
         header = self.table.horizontalHeader()
-        for col in range(4):
+        for col in range(5):
             header.setSectionResizeMode(col, QHeaderView.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.Fixed)
-        self.table.setColumnWidth(4, 46)
+        header.setSectionResizeMode(5, QHeaderView.Fixed)
+        self.table.setColumnWidth(5, 46)
         table_layout.addWidget(self.table)
         table_group.setLayout(table_layout)
         bottom_layout.addWidget(table_group, 70)
@@ -418,6 +422,7 @@ class MainWindow(QMainWindow):
         self.bev_widget.setImage(None)
         self.reload_video_points()
         self.refresh_current_views()
+        self._fill_residual_column(cam)
         self.refresh_quality_label()
         self.refresh_freeze_button()
         self._loading_camera = False
@@ -468,41 +473,65 @@ class MainWindow(QMainWindow):
             if len(cam.image_points) >= 4 and len(cam.local_world_points) == len(cam.image_points):
                 cam.compute_local_bev(self.project.scale, self.project.padding)
         self.refresh_current_views()
-        self.schedule_mosaic_refresh()
+        self._fill_residual_column(self.current_camera)
 
     def add_table_row(self, img_x, img_y, world_x, world_y):
         row = self.table.rowCount()
         self.table.insertRow(row)
-        item_x = QTableWidgetItem(str(int(round(float(img_x)))))
-        item_y = QTableWidgetItem(str(int(round(float(img_y)))))
+        item_x = QTableWidgetItem(f"{float(img_x):.1f}")
+        item_y = QTableWidgetItem(f"{float(img_y):.1f}")
         item_x.setFlags(item_x.flags() & ~Qt.ItemIsEditable)
         item_y.setFlags(item_y.flags() & ~Qt.ItemIsEditable)
         self.table.setItem(row, 0, item_x)
         self.table.setItem(row, 1, item_y)
-        self.table.setItem(row, 2, QTableWidgetItem(str(world_x)))
-        self.table.setItem(row, 3, QTableWidgetItem(str(world_y)))
+        item_wx = QTableWidgetItem(str(world_x))
+        item_wy = QTableWidgetItem(str(world_y))
+        if str(world_x).strip() == "" or str(world_y).strip() == "":
+            # 待填写的物理坐标标黄，避免用户漏填后静默使用错误值
+            item_wx.setBackground(QColor(255, 242, 180))
+            item_wy.setBackground(QColor(255, 242, 180))
+        self.table.setItem(row, 2, item_wx)
+        self.table.setItem(row, 3, item_wy)
+        residual_item = QTableWidgetItem("")
+        residual_item.setFlags(residual_item.flags() & ~Qt.ItemIsEditable)
+        self.table.setItem(row, 4, residual_item)
         del_btn = QPushButton("X")
         del_btn.setObjectName("deleteBtn")
         del_btn.clicked.connect(self._on_table_delete)
-        self.table.setCellWidget(row, 4, del_btn)
+        self.table.setCellWidget(row, 5, del_btn)
+
+    def _fill_residual_column(self, cam):
+        residuals = getattr(cam, "last_residuals_cm", []) or []
+        for row in range(self.table.rowCount()):
+            text = f"{residuals[row]:.1f}" if row < len(residuals) else ""
+            item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            if row < len(residuals) and residuals[row] > 5.0:
+                item.setBackground(QColor(255, 205, 205))
+            self.table.setItem(row, 4, item)
 
     def on_point_added(self, nx, ny):
         frame = self.calibration_frame(self.current_camera.camera_id)
         if frame is None:
             return
         h, w = frame.shape[:2]
-        orig_x = int(nx * w)
-        orig_y = int(ny * h)
+        orig_x = nx * w
+        orig_y = ny * h
         default_world = [(0, 0), (5, 0), (5, 5), (0, 5)]
         row = self.table.rowCount()
-        wx, wy = default_world[row % 4] if row < 4 else (0.0, 0.0)
+        # 只给前 4 个点默认值；之后留空强制用户填写，
+        # 避免重复的 (0,0) 静默污染标定
+        if row < 4:
+            wx, wy = default_world[row]
+        else:
+            wx, wy = "", ""
         self.add_table_row(orig_x, orig_y, wx, wy)
         self.sync_ui_to_camera()
 
     def _on_table_delete(self):
         btn = self.sender()
         for row in range(self.table.rowCount()):
-            if self.table.cellWidget(row, 4) is btn:
+            if self.table.cellWidget(row, 5) is btn:
                 self.table.removeRow(row)
                 self.video_widget.remove_point(row)
                 self.sync_ui_to_camera()
@@ -519,7 +548,6 @@ class MainWindow(QMainWindow):
         self.current_camera.clear_points()
         self.bev_widget.setImage(None)
         self.refresh_quality_label()
-        self.schedule_mosaic_refresh()
 
     def reload_video_points(self):
         cam = self.current_camera
@@ -543,8 +571,8 @@ class MainWindow(QMainWindow):
         cam = self.current_camera
         ok, msg = cam.compute_local_bev(self.project.scale, self.project.padding)
         if ok:
+            self._fill_residual_column(cam)
             self.refresh_current_views()
-            self.schedule_mosaic_refresh()
             QMessageBox.information(self, "成功", msg)
         else:
             QMessageBox.critical(self, "计算失败", msg)
@@ -586,7 +614,6 @@ class MainWindow(QMainWindow):
         self.quality_label.setText("配准状态：" + msg)
         self.register_btn.setEnabled(True)
         self.registration_thread = None
-        self.schedule_mosaic_refresh()
 
     def toggle_freeze_current_frame(self):
         cam_id = self.current_camera.camera_id
@@ -624,6 +651,9 @@ class MainWindow(QMainWindow):
             if not cam.url:
                 continue
             thread = VideoThread(cam.camera_id, cam.url)
+            # 直连 FrameStore（在采集线程内执行），融合线程从那里取帧；
+            # on_frame 只负责 GUI 预览
+            thread.frame_signal.connect(self.frame_store.put)
             thread.frame_signal.connect(self.on_frame)
             thread.error_signal.connect(self.on_stream_error)
             thread.start()
@@ -645,10 +675,12 @@ class MainWindow(QMainWindow):
     def on_frame(self, camera_id, frame):
         self.frames[camera_id] = frame
         if camera_id == self.current_camera.camera_id and camera_id not in self.frozen_frames:
-            self.video_widget.setImage(self.cv_to_pixmap(frame))
-            self.reload_video_points()
-            self.refresh_current_views()
-        self.schedule_mosaic_refresh()
+            # 预览节流：BEV warp 和 pixmap 转换不必跟满帧率
+            now = time.monotonic()
+            if now - self._last_preview_ts >= 0.15:
+                self._last_preview_ts = now
+                self.reload_video_points()
+                self.refresh_current_views()
 
     def on_stream_error(self, camera_id, msg):
         cam = next((c for c in self.project.cameras if c.camera_id == camera_id), None)
@@ -666,21 +698,11 @@ class MainWindow(QMainWindow):
             if bev is not None:
                 self.bev_widget.setImage(self.cv_to_pixmap(bev))
 
-    def refresh_mosaic(self):
-        mosaic, debug_bevs = self.fusion.build_mosaic(self.project.cameras, self.frames)
+    def on_mosaic_ready(self, mosaic):
         if mosaic is not None:
             self.mosaic_widget.setImage(self.cv_to_pixmap(mosaic))
         else:
             self.mosaic_widget.setImage(None)
-
-    def schedule_mosaic_refresh(self):
-        self.mosaic_dirty = True
-
-    def flush_mosaic_refresh(self):
-        if not self.mosaic_dirty:
-            return
-        self.mosaic_dirty = False
-        self.refresh_mosaic()
 
     def refresh_quality_label(self):
         cam = self.current_camera
@@ -722,6 +744,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.sync_ui_to_camera()
         self.stop_streams()
+        self.fusion_worker.stop()
         if self.registration_thread is not None:
             self.registration_thread.wait()
         event.accept()

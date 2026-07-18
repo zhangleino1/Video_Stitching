@@ -14,6 +14,9 @@ if str(REPO_ROOT) not in sys.path:
 from lightgluestick.two_view_pipeline import TwoViewPipeline
 from lightgluestick.utils import batch_to_np, numpy_image_to_torch
 
+# 配准前将 BEV 最长边缩到该尺寸以内,匹配点坐标再放大回原分辨率
+MAX_MATCH_DIM = 1024
+
 
 @dataclass
 class RegistrationResult:
@@ -23,30 +26,77 @@ class RegistrationResult:
     quality: dict = None
 
 
-def _transform_corners(width, height, transform):
-    corners = np.float32([[0, 0], [width, 0], [width, height], [0, height]]).reshape(-1, 1, 2)
-    return cv2.perspectiveTransform(corners, transform).reshape(-1, 2)
+def estimate_rigid_transform(src_pts, dst_pts):
+    """Kabsch:估计 src → dst 的纯旋转+平移(scale 恒为 1)。
+
+    两路 BEV 由同一 px/m 比例生成,物理上只可能差刚体变换;
+    放开 scale 自由度只会让匹配噪声污染物理尺度。
+    """
+    src = np.asarray(src_pts, dtype=np.float64).reshape(-1, 2)
+    dst = np.asarray(dst_pts, dtype=np.float64).reshape(-1, 2)
+    centroid_src = src.mean(axis=0)
+    centroid_dst = dst.mean(axis=0)
+    cov = (src - centroid_src).T @ (dst - centroid_dst)
+    u, _, vt = np.linalg.svd(cov)
+    d = np.sign(np.linalg.det(vt.T @ u.T))
+    rotation = vt.T @ np.diag([1.0, d]) @ u.T
+    translation = centroid_dst - rotation @ centroid_src
+    transform = np.eye(3, dtype=np.float64)
+    transform[:2, :2] = rotation
+    transform[:2, 2] = translation
+    return transform
 
 
-def _as_homogeneous(affine_2x3):
-    H = np.eye(3, dtype=np.float64)
-    H[:2, :] = affine_2x3
-    return H
+def solve_layout(node_count, edges, anchor):
+    """由通过质检的两两配准边构建最大生成树,从 anchor 出发合成全局变换。
+
+    edges: [(score, i, j, T_ji), ...],T_ji 把节点 j 的坐标映射到节点 i。
+    返回 {节点下标: 3x3 变换到 anchor 坐标系},不连通节点不在结果中。
+    """
+    parent = list(range(node_count))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    adjacency = {i: [] for i in range(node_count)}
+    for score, i, j, transform in sorted(edges, key=lambda e: e[0], reverse=True):
+        root_i, root_j = find(i), find(j)
+        if root_i == root_j:
+            continue
+        parent[root_i] = root_j
+        adjacency[i].append((j, transform, True))    # M_j = M_i @ T
+        adjacency[j].append((i, transform, False))   # M_i = M_j @ inv(T)
+
+    transforms = {anchor: np.eye(3, dtype=np.float64)}
+    queue = [anchor]
+    while queue:
+        node = queue.pop(0)
+        for neighbor, transform, forward in adjacency[node]:
+            if neighbor in transforms:
+                continue
+            if forward:
+                transforms[neighbor] = transforms[node] @ transform
+            else:
+                transforms[neighbor] = transforms[node] @ np.linalg.inv(transform)
+            queue.append(neighbor)
+    return transforms
 
 
-def _affine_quality(matrix_2x3):
-    a, b, tx = matrix_2x3[0]
-    c, d, ty = matrix_2x3[1]
-    scale_x = math.sqrt(a * a + c * c)
-    scale_y = math.sqrt(b * b + d * d)
-    scale = (scale_x + scale_y) / 2.0
-    rotation_deg = math.degrees(math.atan2(c, a))
-    return {
-        "dx": float(tx),
-        "dy": float(ty),
-        "scale": float(scale),
-        "rotation_deg": float(rotation_deg),
-    }
+def _resize_for_match(image):
+    h, w = image.shape[:2]
+    longest = max(h, w)
+    if longest <= MAX_MATCH_DIM:
+        return image, 1.0
+    scale = MAX_MATCH_DIM / longest
+    resized = cv2.resize(
+        image,
+        (int(round(w * scale)), int(round(h * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
+    return resized, scale
 
 
 class LightGlueBevRegistrar:
@@ -58,8 +108,8 @@ class LightGlueBevRegistrar:
         self.min_matches = 12
         self.min_inliers = 8
         self.min_inlier_ratio = 0.25
-        self.min_scale = 0.70
-        self.max_scale = 1.30
+        # 相似变换估出的 scale 偏离 1 超过该值,说明两路标定的物理比例对不上
+        self.scale_tolerance = 0.08
         self.max_abs_rotation_deg = 35.0
         self.max_translation_factor = 2.5
 
@@ -102,8 +152,10 @@ class LightGlueBevRegistrar:
 
     def _match_points(self, fixed_bev, moving_bev):
         self._ensure_model()
-        gray0 = cv2.cvtColor(fixed_bev, cv2.COLOR_BGR2GRAY)
-        gray1 = cv2.cvtColor(moving_bev, cv2.COLOR_BGR2GRAY)
+        fixed_small, scale_fixed = _resize_for_match(fixed_bev)
+        moving_small, scale_moving = _resize_for_match(moving_bev)
+        gray0 = cv2.cvtColor(fixed_small, cv2.COLOR_BGR2GRAY)
+        gray1 = cv2.cvtColor(moving_small, cv2.COLOR_BGR2GRAY)
         t0 = numpy_image_to_torch(gray0).to(self.device)[None]
         t1 = numpy_image_to_torch(gray1).to(self.device)[None]
         with torch.no_grad():
@@ -113,7 +165,7 @@ class LightGlueBevRegistrar:
         kp1 = pred["keypoints1"]
         matches0 = pred["matches0"]
         valid = matches0 != -1
-        return kp0[valid], kp1[matches0[valid]]
+        return kp0[valid] / scale_fixed, kp1[matches0[valid]] / scale_moving
 
     def register(self, fixed_bev, moving_bev):
         if fixed_bev is None or moving_bev is None:
@@ -122,13 +174,14 @@ class LightGlueBevRegistrar:
         try:
             pts_fixed, pts_moving = self._match_points(fixed_bev, moving_bev)
         except Exception as exc:
-            return RegistrationResult(False, f"LightGlueStick 运行失败：{exc}", quality={})
+            return RegistrationResult(False, f"LightGlueStick 运行失败:{exc}", quality={})
 
         match_count = int(len(pts_fixed))
         quality = {"matches": match_count, "inliers": 0, "inlier_ratio": 0.0}
         if match_count < self.min_matches:
-            return RegistrationResult(False, f"匹配点不足：{match_count}", quality=quality)
+            return RegistrationResult(False, f"匹配点不足:{match_count}", quality=quality)
 
+        # 相似变换 RANSAC 仅用于筛内点和检测尺度一致性,最终变换用刚体重拟合
         affine, inlier_mask = cv2.estimateAffinePartial2D(
             pts_moving,
             pts_fixed,
@@ -141,32 +194,45 @@ class LightGlueBevRegistrar:
         if affine is None or inlier_mask is None:
             return RegistrationResult(False, "相似变换估计失败。", quality=quality)
 
-        inliers = int(inlier_mask.ravel().sum())
+        inlier_mask = inlier_mask.ravel().astype(bool)
+        inliers = int(inlier_mask.sum())
         inlier_ratio = inliers / max(match_count, 1)
-        quality.update(_affine_quality(affine))
+        sim_scale = math.sqrt(abs(affine[0, 0] * affine[1, 1] - affine[0, 1] * affine[1, 0]))
+
+        transform = estimate_rigid_transform(
+            pts_moving[inlier_mask], pts_fixed[inlier_mask]
+        )
+        rotation_deg = math.degrees(math.atan2(transform[1, 0], transform[0, 0]))
         quality.update({
             "matches": match_count,
             "inliers": inliers,
             "inlier_ratio": float(inlier_ratio),
+            "scale": float(sim_scale),
+            "rotation_deg": float(rotation_deg),
+            "dx": float(transform[0, 2]),
+            "dy": float(transform[1, 2]),
         })
 
-        max_dim = max(fixed_bev.shape[1], fixed_bev.shape[0], moving_bev.shape[1], moving_bev.shape[0])
+        max_dim = max(fixed_bev.shape[1], fixed_bev.shape[0],
+                      moving_bev.shape[1], moving_bev.shape[0])
         reasons = []
         if inliers < self.min_inliers:
             reasons.append(f"inliers={inliers} < {self.min_inliers}")
         if inlier_ratio < self.min_inlier_ratio:
             reasons.append(f"inlier_ratio={inlier_ratio:.2f} < {self.min_inlier_ratio:.2f}")
-        if not (self.min_scale <= quality["scale"] <= self.max_scale):
-            reasons.append(f"scale={quality['scale']:.2f} 超出范围")
-        if abs(quality["rotation_deg"]) > self.max_abs_rotation_deg:
-            reasons.append(f"rotation={quality['rotation_deg']:.1f}° 过大")
+        if abs(sim_scale - 1.0) > self.scale_tolerance:
+            reasons.append(
+                f"scale={sim_scale:.3f} 偏离 1(两路相机的标定物理比例可能不一致)"
+            )
+        if abs(rotation_deg) > self.max_abs_rotation_deg:
+            reasons.append(f"rotation={rotation_deg:.1f}° 过大")
         if max(abs(quality["dx"]), abs(quality["dy"])) > max_dim * self.max_translation_factor:
             reasons.append("平移量异常")
 
         if reasons:
-            return RegistrationResult(False, "自动配准被拒绝：" + "；".join(reasons), quality=quality)
+            return RegistrationResult(False, "自动配准被拒绝:" + ";".join(reasons), quality=quality)
 
-        return RegistrationResult(True, "自动配准成功。", _as_homogeneous(affine), quality)
+        return RegistrationResult(True, "自动配准成功。", transform, quality)
 
 
 class MultiCameraFusion:
@@ -175,96 +241,78 @@ class MultiCameraFusion:
         self.canvas_padding = int(canvas_padding)
 
     def compute_pairwise_registrations(self, cameras, bev_images):
-        active = [cam for cam in cameras if cam.enabled and cam.is_calibrated and cam.camera_id in bev_images]
+        active = [
+            cam for cam in cameras
+            if cam.enabled and cam.is_calibrated and cam.camera_id in bev_images
+        ]
+        # 先清空全部旧变换:上一轮的结果属于不同的 anchor/布局,
+        # 复用会把后续相机挂到不一致的参考系上
+        for cam in active:
+            cam.bev_to_mosaic_transform = None
+            cam.last_registration_quality = {}
+
         if not active:
             return "没有可用的已标定摄像头。"
+        if len(active) == 1:
+            active[0].bev_to_mosaic_transform = np.eye(3, dtype=np.float64)
+            active[0].last_registration_quality = {"anchor": True, "message": "Anchor camera"}
+            return f"{active[0].name}: anchor(仅一路可用)"
 
-        active[0].bev_to_mosaic_transform = np.eye(3, dtype=np.float64)
-        active[0].last_registration_quality = {
-            "anchor": True,
-            "message": "Anchor camera",
-        }
-        messages = [f"{active[0].name}: anchor"]
-
-        prev = active[0]
-        for cam in active[1:]:
-            result = self.registrar.register(bev_images[prev.camera_id], bev_images[cam.camera_id])
-            quality = dict(result.quality or {})
-            quality["message"] = result.message
-            quality["fixed_camera"] = prev.camera_id
-            quality["moving_camera"] = cam.camera_id
-            if result.accepted:
-                cam.bev_to_mosaic_transform = prev.bev_to_mosaic_transform @ result.transform
-                cam.last_registration_quality = quality
-                prev = cam
-                messages.append(
-                    f"{cam.name}: OK matches={quality.get('matches', 0)} "
-                    f"inliers={quality.get('inliers', 0)} ratio={quality.get('inlier_ratio', 0):.2f}"
+        # 两两配准(N≤4 → 最多 6 对),按 inliers 选边
+        edges = []
+        edge_quality = {}
+        messages = []
+        for i in range(len(active)):
+            for j in range(i + 1, len(active)):
+                result = self.registrar.register(
+                    bev_images[active[i].camera_id],
+                    bev_images[active[j].camera_id],
                 )
-            else:
+                pair_name = f"{active[i].name}↔{active[j].name}"
+                quality = dict(result.quality or {})
+                quality["message"] = result.message
+                quality["fixed_camera"] = active[i].camera_id
+                quality["moving_camera"] = active[j].camera_id
+                if result.accepted:
+                    score = quality.get("inliers", 0)
+                    edges.append((score, i, j, result.transform))
+                    edge_quality[(i, j)] = quality
+                    messages.append(
+                        f"{pair_name}: OK inliers={quality.get('inliers', 0)} "
+                        f"ratio={quality.get('inlier_ratio', 0):.2f}"
+                    )
+                else:
+                    messages.append(f"{pair_name}: FAIL {result.message}")
+
+        if not edges:
+            return "所有相机对配准均失败:" + " | ".join(messages)
+
+        # anchor 取连通边 inliers 总和最大的相机
+        scores = [0] * len(active)
+        for score, i, j, _ in edges:
+            scores[i] += score
+            scores[j] += score
+        anchor = int(np.argmax(scores))
+
+        transforms = solve_layout(len(active), edges, anchor)
+
+        active[anchor].bev_to_mosaic_transform = np.eye(3, dtype=np.float64)
+        active[anchor].last_registration_quality = {"anchor": True, "message": "Anchor camera"}
+        placed, unplaced = [], []
+        for idx, cam in enumerate(active):
+            if idx == anchor:
+                continue
+            if idx in transforms:
+                cam.bev_to_mosaic_transform = transforms[idx]
+                quality = edge_quality.get((anchor, idx)) or edge_quality.get((idx, anchor)) \
+                    or next((q for (a, b), q in edge_quality.items() if idx in (a, b)), {})
                 cam.last_registration_quality = quality
-                if cam.bev_to_mosaic_transform is not None:
-                    prev = cam
-                messages.append(f"{cam.name}: FAIL {result.message}")
-        return " | ".join(messages)
+                placed.append(cam.name)
+            else:
+                cam.last_registration_quality = {"message": "未能与其它相机连通,保持未拼接"}
+                unplaced.append(cam.name)
 
-    def build_mosaic(self, cameras, frames_by_id):
-        entries = []
-        has_anchor = False
-        for cam in cameras:
-            if not cam.enabled or not cam.is_calibrated:
-                continue
-            frame = frames_by_id.get(cam.camera_id)
-            if frame is None:
-                continue
-            transform = cam.bev_to_mosaic_transform
-            if transform is None:
-                if has_anchor:
-                    continue
-                transform = np.eye(3, dtype=np.float64)
-            bev, mask = cam.warp_to_bev(frame)
-            if bev is None or mask is None:
-                continue
-            entries.append((cam, bev, mask, transform))
-            has_anchor = True
-
-        if not entries:
-            return None, {}
-
-        all_corners = []
-        for cam, bev, mask, transform in entries:
-            all_corners.append(_transform_corners(bev.shape[1], bev.shape[0], transform))
-        all_corners = np.vstack(all_corners)
-        min_xy = np.floor(all_corners.min(axis=0)).astype(int)
-        max_xy = np.ceil(all_corners.max(axis=0)).astype(int)
-        width = int(max_xy[0] - min_xy[0] + 2 * self.canvas_padding)
-        height = int(max_xy[1] - min_xy[1] + 2 * self.canvas_padding)
-        if width <= 0 or height <= 0:
-            return None, {}
-
-        shift = np.array([
-            [1, 0, -min_xy[0] + self.canvas_padding],
-            [0, 1, -min_xy[1] + self.canvas_padding],
-            [0, 0, 1],
-        ], dtype=np.float64)
-
-        accum = np.zeros((height, width, 3), dtype=np.float32)
-        weights = np.zeros((height, width), dtype=np.float32)
-        debug_bevs = {}
-
-        for cam, bev, mask, transform in entries:
-            T = shift @ transform
-            warped = cv2.warpPerspective(bev, T, (width, height), flags=cv2.INTER_LINEAR)
-            warped_mask = cv2.warpPerspective(mask, T, (width, height), flags=cv2.INTER_NEAREST)
-            binary = (warped_mask > 0).astype(np.uint8)
-            weight = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-            if weight.max() <= 0:
-                weight = binary.astype(np.float32)
-            accum += warped.astype(np.float32) * weight[..., None]
-            weights += weight
-            debug_bevs[cam.camera_id] = bev
-
-        mosaic = np.zeros_like(accum, dtype=np.uint8)
-        valid = weights > 0
-        mosaic[valid] = np.clip(accum[valid] / weights[valid, None], 0, 255).astype(np.uint8)
-        return mosaic, debug_bevs
+        summary = f"anchor={active[anchor].name}"
+        if unplaced:
+            summary += f" | 未连通:{', '.join(unplaced)}"
+        return summary + " | " + " | ".join(messages)

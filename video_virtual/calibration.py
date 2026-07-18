@@ -30,6 +30,7 @@ class CameraCalibration:
     local_bev_homography: np.ndarray = None
     bev_to_mosaic_transform: np.ndarray = None
     last_registration_quality: dict = field(default_factory=dict)
+    last_residuals_cm: list = field(default_factory=list)
     bev_width: int = 800
     bev_height: int = 800
     world_offset_px: tuple = (0.0, 0.0)
@@ -44,6 +45,7 @@ class CameraCalibration:
         self.local_bev_homography = None
         self.bev_to_mosaic_transform = None
         self.last_registration_quality = {}
+        self.last_residuals_cm = []
 
     def compute_local_bev(self, scale, padding=DEFAULT_PADDING):
         if len(self.image_points) < 4 or len(self.local_world_points) < 4:
@@ -53,6 +55,11 @@ class CameraCalibration:
 
         img_pts = np.array(self.image_points, dtype=np.float32)
         world_pts = np.array(self.local_world_points, dtype=np.float32)
+        # 重复的物理坐标(常见于忘改默认值)会静默污染 RANSAC,必须显式报错
+        for i in range(len(world_pts)):
+            for j in range(i + 1, len(world_pts)):
+                if np.linalg.norm(world_pts[i] - world_pts[j]) < 0.01:
+                    return False, f"第 {i + 1} 行与第 {j + 1} 行的物理坐标重复,请检查。"
         if np.linalg.matrix_rank(world_pts - world_pts.mean(axis=0)) < 2:
             return False, "物理坐标点不能共线。"
         if np.linalg.matrix_rank(img_pts - img_pts.mean(axis=0)) < 2:
@@ -73,13 +80,24 @@ class CameraCalibration:
         if H is None:
             return False, "Homography 计算失败，请检查标定点顺序和坐标。"
 
+        # 每个点的重投影残差（cm），用于在 UI 中反馈标定质量
+        projected = cv2.perspectiveTransform(
+            img_pts.reshape(-1, 1, 2), H
+        ).reshape(-1, 2)
+        err_px = np.linalg.norm(projected - bev_pts, axis=1)
+        residuals_cm = err_px / float(scale) * 100.0
+        self.last_residuals_cm = [float(v) for v in residuals_cm]
+
         self.local_bev_homography = H
         self.bev_width = width
         self.bev_height = height
         self.world_offset_px = (float(offset[0]), float(offset[1]))
         self.bev_to_mosaic_transform = None
         self.last_registration_quality = {}
-        return True, f"BEV 标定完成：{width}x{height}"
+        return True, (
+            f"BEV 标定完成：{width}x{height}，"
+            f"最大残差 {float(residuals_cm.max()):.1f} cm"
+        )
 
     def warp_to_bev(self, frame):
         if frame is None or self.local_bev_homography is None:
