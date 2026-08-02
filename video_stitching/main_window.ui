@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="windowTitle">
+   <string>多摄像头拼接监控系统</string>
+  </property>
+
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QVBoxLayout" name="mainLayout">
+    <property name="spacing"><number>8</number></property>
+    <property name="leftMargin"><number>10</number></property>
+    <property name="topMargin"><number>8</number></property>
+    <property name="rightMargin"><number>10</number></property>
+    <property name="bottomMargin"><number>4</number></property>
+
+    <!-- 标题栏 -->
+    <item>
+     <widget class="QWidget" name="headerWidget">
+      <layout class="QHBoxLayout" name="headerLayout">
+       <property name="leftMargin"><number>4</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>4</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="titleLabel">
+         <property name="text"><string>多摄像头拼接监控系统</string></property>
+         <property name="styleSheet">
+          <string>color:#7888bb; font-size:15px; font-weight:bold; letter-spacing:2px;</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="subtitleLabel">
+         <property name="text"><string>实时画面拼接 · 区域人员统计</string></property>
+         <property name="styleSheet">
+          <string>color:#3a4060; font-size:11px; margin-left:12px;</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="headerSpacer">
+         <property name="orientation"><enum>Qt::Horizontal</enum></property>
+         <property name="sizeHint" stdset="0">
+          <size><width>40</width><height>20</height></size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+    </item>
+
+    <!-- 上半区：摄像头 + 控制面板 -->
+    <item>
+     <layout class="QHBoxLayout" name="topRowLayout">
+      <property name="spacing"><number>8</number></property>
+
+      <!-- 摄像头预览：面板数量由 config.yaml 的 cameras 决定，运行时生成 -->
+      <item>
+       <widget class="QWidget" name="camContainer">
+        <layout class="QHBoxLayout" name="camRowLayout">
+         <property name="spacing"><number>8</number></property>
+         <property name="leftMargin"><number>0</number></property>
+         <property name="topMargin"><number>0</number></property>
+         <property name="rightMargin"><number>0</number></property>
+         <property name="bottomMargin"><number>0</number></property>
+        </layout>
+       </widget>
+      </item>
+
+      <!-- 操作面板 -->
+      <item>
+       <widget class="QFrame" name="ctrlPanel">
+        <property name="maximumSize">
+         <size><width>152</width><height>16777215</height></size>
+        </property>
+        <property name="minimumSize">
+         <size><width>152</width><height>0</height></size>
+        </property>
+        <property name="styleSheet">
+         <string>QFrame { background-color:#1c1f2c; border:1px solid #2a2f45; border-radius:8px; }</string>
+        </property>
+        <layout class="QVBoxLayout" name="ctrlLayout">
+         <property name="spacing"><number>8</number></property>
+         <property name="leftMargin"><number>10</number></property>
+         <property name="topMargin"><number>10</number></property>
+         <property name="rightMargin"><number>10</number></property>
+         <property name="bottomMargin"><number>10</number></property>
+         <item>
+          <widget class="QLabel" name="ctrlTitleLabel">
+           <property name="text"><string>操作面板</string></property>
+           <property name="alignment"><set>Qt::AlignCenter</set></property>
+           <property name="styleSheet">
+            <string>color:#5a6a9a; font-size:10px; font-weight:bold; letter-spacing:1.5px; padding:5px 8px 3px 8px; border:none;</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btn_draw">
+           <property name="text"><string>绘制区域</string></property>
+           <property name="toolTip"><string>在拼接图上圈定监控区域</string></property>
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+             <horstretch>0</horstretch><verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btn_clear">
+           <property name="text"><string>清除区域</string></property>
+           <property name="toolTip"><string>清除当前监控区域</string></property>
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+             <horstretch>0</horstretch><verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btn_recal">
+           <property name="text"><string>重新校准</string></property>
+           <property name="toolTip"><string>重新计算拼接矩阵</string></property>
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+             <horstretch>0</horstretch><verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="ctrlSpacer1_5">
+           <property name="orientation"><enum>Qt::Vertical</enum></property>
+           <property name="sizeType"><enum>QSizePolicy::Fixed</enum></property>
+           <property name="sizeHint" stdset="0">
+            <size><width>20</width><height>12</height></size>
+           </property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QLabel" name="fovLabel">
+           <property name="text"><string>FOV: 65°</string></property>
+           <property name="alignment"><set>Qt::AlignCenter</set></property>
+           <property name="styleSheet">
+            <string>color:#5a6a9a; font-size:10px; font-weight:bold; letter-spacing:1px; border:none;</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QSlider" name="fovSlider">
+           <property name="orientation"><enum>Qt::Horizontal</enum></property>
+           <!-- 40~110：低于 40 单应链发散，高于 110 柱面输出宽度过窄、分辨率不足以匹配。
+                （上限曾因柱面参数化错误而只能到 100，修正采样后已放宽。） -->
+           <property name="minimum"><number>40</number></property>
+           <property name="maximum"><number>110</number></property>
+           <property name="value"><number>65</number></property>
+           <property name="toolTip"><string>调整相机视场角(FOV)以改善畸变；过小会使拼接发散，过大会导致匹配失败</string></property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="ctrlSpacer1">
+           <property name="orientation"><enum>Qt::Vertical</enum></property>
+           <property name="sizeType"><enum>QSizePolicy::Fixed</enum></property>
+           <property name="sizeHint" stdset="0">
+            <size><width>20</width><height>12</height></size>
+           </property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QLabel" name="countLabel">
+           <property name="text"><string>监控区域人数</string></property>
+           <property name="alignment"><set>Qt::AlignCenter</set></property>
+           <property name="styleSheet">
+            <string>color:#4a608a; font-size:10px; letter-spacing:1px; border:none;</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="count_num">
+           <property name="text"><string>—</string></property>
+           <property name="alignment"><set>Qt::AlignCenter</set></property>
+           <property name="styleSheet">
+            <string>color:#40c8ff; font-size:38px; font-weight:bold; border:none;</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="ctrlSpacer2">
+           <property name="orientation"><enum>Qt::Vertical</enum></property>
+           <property name="sizeHint" stdset="0">
+            <size><width>20</width><height>40</height></size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </widget>
+      </item>
+
+     </layout>
+    </item>
+
+    <!-- 拼接画面 -->
+    <item>
+     <widget class="QFrame" name="stitchPanel">
+      <property name="styleSheet">
+       <string>QFrame { background-color:#181b26; border:1px solid #252a3e; border-radius:8px; }</string>
+      </property>
+      <layout class="QVBoxLayout" name="stitchLayout">
+       <property name="spacing"><number>0</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>4</number></property>
+       <item>
+        <widget class="QLabel" name="stitchTitleLabel">
+         <property name="text"><string>拼接画面  ·  双击或点击起点完成区域绘制，右键撤销上一点</string></property>
+         <property name="alignment"><set>Qt::AlignCenter</set></property>
+         <property name="styleSheet">
+          <string>color:#5a6a9a; font-size:10px; font-weight:bold; letter-spacing:1.5px; padding:5px 8px 3px 8px;</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="StitchedView" name="stitched_view">
+         <property name="alignment"><set>Qt::AlignCenter</set></property>
+         <property name="styleSheet"><string>background:#0a0c10;</string></property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+
+   </layout>
+  </widget>
+
+  <widget class="QStatusBar" name="statusbar"/>
+
+ </widget>
+
+ <customwidgets>
+  <customwidget>
+   <class>StitchedView</class>
+   <extends>QLabel</extends>
+   <header>widgets</header>
+  </customwidget>
+ </customwidgets>
+
+</ui>
