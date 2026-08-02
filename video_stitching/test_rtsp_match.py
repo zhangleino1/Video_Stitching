@@ -1,12 +1,22 @@
+import sys
+from pathlib import Path
+
 import cv2
 import yaml
 import torch
 import numpy as np
 from matplotlib import pyplot as plt
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from lightgluestick.utils import batch_to_np, numpy_image_to_torch
 from lightgluestick.viz2d import plot_images, plot_lines, plot_color_line_matches, plot_keypoints, plot_matches
 from lightgluestick.two_view_pipeline import TwoViewPipeline
+
+HERE = Path(__file__).resolve().parent
+CONFIG_PATH = HERE / "config.yaml"
 
 def capture_frame(rtsp_url, num_frames_to_skip=5):
     print(f"Connecting to: {rtsp_url}")
@@ -30,7 +40,7 @@ def capture_frame(rtsp_url, num_frames_to_skip=5):
 def main():
     # Load config
     try:
-        with open("config.yaml", "r") as f:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
     except Exception as e:
         print(f"Error reading config.yaml: {e}")
@@ -53,8 +63,8 @@ def main():
         return
     
     # Save the captured frames for reference
-    cv2.imwrite("rtsp_frame1.jpg", frame0_bgr)
-    cv2.imwrite("rtsp_frame2.jpg", frame1_bgr)
+    cv2.imwrite(str(HERE / "rtsp_frame1.jpg"), frame0_bgr)
+    cv2.imwrite(str(HERE / "rtsp_frame2.jpg"), frame1_bgr)
     print("Saved captured frames to rtsp_frame1.jpg and rtsp_frame2.jpg")
     
     # Convert to grayscale for LightGlueStick
@@ -135,22 +145,22 @@ def main():
     plot_images([img0, img1], ['Image 1 - detected lines', 'Image 2 - detected lines'], dpi=200, pad=2.0)
     plot_lines([line_seg0, line_seg1], ps=4, lw=2)
     plt.gcf().canvas.manager.set_window_title('Detected Lines')
-    plt.savefig('rtsp_detected_lines.png')
+    plt.savefig(str(HERE / "rtsp_detected_lines.png"))
 
     plot_images([img0, img1], ['Image 1 - detected points', 'Image 2 - detected points'], dpi=200, pad=2.0)
     plot_keypoints([kp0, kp1], colors='c')
     plt.gcf().canvas.manager.set_window_title('Detected Points')
-    plt.savefig('rtsp_detected_points.png')
+    plt.savefig(str(HERE / "rtsp_detected_points.png"))
 
     plot_images([img0, img1], ['Image 1 - line matches', 'Image 2 - line matches'], dpi=200, pad=2.0)
     plot_color_line_matches([matched_lines0, matched_lines1], lw=2)
     plt.gcf().canvas.manager.set_window_title('Line Matches')
-    plt.savefig('rtsp_line_matches.png')
+    plt.savefig(str(HERE / "rtsp_line_matches.png"))
 
     plot_images([img0, img1], ['Image 1 - point matches', 'Image 2 - point matches'], dpi=200, pad=2.0)
     plot_matches(matched_kps0, matched_kps1, 'green', lw=1, ps=0)
     plt.gcf().canvas.manager.set_window_title('Point Matches')
-    plt.savefig('rtsp_point_matches.png')
+    plt.savefig(str(HERE / "rtsp_point_matches.png"))
     
     print("Test completed successfully! Check the rtsp_*.png files for results.")
 

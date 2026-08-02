@@ -1,0 +1,21 @@
+cameras:
+- {url: 'rtsp://192.168.2.165:8080/h264_ulaw.sdp'}
+- {url: 'rtsp://192.168.2.157:8080/h264_ulaw.sdp'}
+- {url: 'rtsp://192.168.2.167:8080/h264_ulaw.sdp'}
+detection:
+  # RF-DETR 型号：nano / small / medium / base / large（越大越准也越慢）
+  model: nano
+  threshold: 0.5
+  # 只显示这些类别；设为 null 或删除该项则显示全部 80 个 COCO 类
+  classes: [person]
+  # 统计 ROI 内该类别的数量，显示在界面的「监控区域人数」
+  count_class: person
+  show_labels: true
+  # 首次推理前用 torch.compile 优化：启动更慢，稳态更快
+  optimize: false
+display: {height: 720, width: 1280}
+region_of_interest:
+- [1706, 463]
+- [2786, 421]
+- [2718, 1012]
+- [1685, 1110]

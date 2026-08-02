@@ -1,9 +1,0 @@
-cameras:
-- {url: 'rtsp://192.168.2.90:8080/h264_ulaw.sdp'}
-- {url: 'rtsp://admin:ZhangLei*2020@192.168.2.106:554/h264/ch1/main/av_stream'}
-display: {height: 720, width: 1280}
-region_of_interest:
-- [1706, 463]
-- [2786, 421]
-- [2718, 1012]
-- [1685, 1110]

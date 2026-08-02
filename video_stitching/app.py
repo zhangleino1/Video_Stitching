@@ -1,15 +1,21 @@
 import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
 import yaml
 from PyQt5 import uic
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import Qt, QMutex, QThread, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtWidgets import QApplication, QMainWindow
+from PyQt5.QtWidgets import (QApplication, QFrame, QLabel, QMainWindow,
+                             QSizePolicy, QVBoxLayout)
 
 from pipeline import StitchingPipeline
 from widgets import StitchedView  # uic 需要能找到自定义控件
+
+HERE = Path(__file__).resolve().parent
+UI_PATH = HERE / "main_window.ui"
+CONFIG_PATH = HERE / "config.yaml"
 
 STYLE = """
 QMainWindow, QWidget {
@@ -91,37 +97,45 @@ class VideoThread(QThread):
 class StitchingThread(QThread):
     stitched_signal = pyqtSignal(np.ndarray, int)
 
-    def __init__(self, roi_polygon):
+    def __init__(self, num_cameras, roi_polygon, detection=None):
         super().__init__()
-        self.pipeline = StitchingPipeline()
+        self.pipeline = StitchingPipeline(detection=detection)
         self.roi_polygon = list(roi_polygon)
-        self.frame1 = None
-        self.frame2 = None
+        self.frames = [None] * num_cameras
+        self._mutex = QMutex()
+        self._dirty = False
         self._run_flag = True
 
     def run(self):
         while self._run_flag:
-            if self.frame1 is not None and self.frame2 is not None:
-                stitched = self.pipeline.stitch_frames(self.frame1, self.frame2)
-                if self.roi_polygon:
-                    result, count = self.pipeline.detect_and_count(stitched, self.roi_polygon)
-                else:
-                    result, count = stitched, 0
-                self.stitched_signal.emit(result, count)
-                self.frame1 = None
-                self.frame2 = None
-            else:
+            self._mutex.lock()
+            ready = self._dirty and all(f is not None for f in self.frames)
+            frames = [f for f in self.frames] if ready else None
+            self._dirty = False
+            self._mutex.unlock()
+
+            if not ready:
                 self.msleep(30)
+                continue
+
+            stitched = self.pipeline.stitch_frames(frames)
+            if stitched is None:
+                continue
+            # 始终跑检测：没有 ROI 时仍然实时标注目标，只是计数退化为总数
+            result, count = self.pipeline.detect_and_count(stitched, self.roi_polygon)
+            self.stitched_signal.emit(result, count)
 
     @pyqtSlot(list)
     def set_roi(self, roi):
         self.roi_polygon = roi
 
     def update_frame(self, frame, index):
-        if index == 0:
-            self.frame1 = frame.copy()
-        elif index == 1:
-            self.frame2 = frame.copy()
+        # 保留每路最新一帧：某路卡顿或断流时，其余画面仍能继续拼接
+        if 0 <= index < len(self.frames):
+            self._mutex.lock()
+            self.frames[index] = frame.copy()
+            self._dirty = True
+            self._mutex.unlock()
 
     def stop(self):
         self._run_flag = False
@@ -133,19 +147,22 @@ class StitchingThread(QThread):
 class App(QMainWindow):
     def __init__(self):
         super().__init__()
-        uic.loadUi("main_window.ui", self)
+        uic.loadUi(str(UI_PATH), self)
 
-        with open("config.yaml") as f:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
+
+        self.cameras = self.config.get("cameras", [])
+        if not self.cameras:
+            raise RuntimeError("config.yaml 中未配置任何摄像头")
 
         self.display_width  = self.config["display"]["width"]
         self.display_height = self.config["display"]["height"]
-        self.cam_w = self.display_width  // 2
-        self.cam_h = self.display_height // 2
+        # 预览行按相机数量均分宽度，保持 16:9
+        self.cam_w = max(self.display_width // max(len(self.cameras), 2), 160)
+        self.cam_h = int(self.cam_w * 9 / 16)
 
-        # 根据配置设置各控件尺寸
-        self.cam1_label.setFixedSize(self.cam_w, self.cam_h)
-        self.cam2_label.setFixedSize(self.cam_w, self.cam_h)
+        self.cam_labels = self._build_cam_panels(len(self.cameras))
         self.stitched_view.setFixedSize(self.display_width, self.display_height)
 
         # 连接按钮信号
@@ -162,6 +179,43 @@ class App(QMainWindow):
         self.statusbar.showMessage(
             '就绪  ·  点击【绘制区域】后在拼接图上依次点击顶点定义监控区域')
 
+    # ── 摄像头预览面板 ─────────────────────────────────────────────────────────
+
+    PANEL_QSS = ("QFrame { background-color:#1c1f2c; border:1px solid #2a2f45; "
+                 "border-radius:8px; }")
+    CAM_TITLE_QSS = ("color:#5a6a9a; font-size:10px; font-weight:bold; "
+                     "letter-spacing:1.5px; padding:5px 8px 3px 8px; border:none;")
+
+    def _build_cam_panels(self, n):
+        """按相机数量生成预览面板，返回各路的画面 QLabel。"""
+        labels = []
+        for i in range(n):
+            panel = QFrame()
+            panel.setObjectName(f"cam{i + 1}Panel")
+            panel.setStyleSheet(self.PANEL_QSS)
+            panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+            box = QVBoxLayout(panel)
+            box.setSpacing(0)
+            box.setContentsMargins(0, 0, 0, 4)
+
+            title = QLabel(f"摄像头 {i + 1}")
+            title.setAlignment(Qt.AlignCenter)
+            title.setStyleSheet(self.CAM_TITLE_QSS)
+            box.addWidget(title)
+
+            view = QLabel()
+            view.setObjectName(f"cam{i + 1}_label")
+            view.setAlignment(Qt.AlignCenter)
+            view.setStyleSheet("background:#0c0e14; border:none;")
+            view.setFixedSize(self.cam_w, self.cam_h)
+            box.addWidget(view)
+
+            self.camRowLayout.addWidget(panel)
+            labels.append(view)
+        self.camRowLayout.addStretch(1)
+        return labels
+
     # ── 线程启动 ───────────────────────────────────────────────────────────────
 
     def _start_threads(self):
@@ -169,12 +223,13 @@ class App(QMainWindow):
         if roi:
             self.stitched_view._roi_img = [list(p) for p in roi]
 
-        self.stitching_thread = StitchingThread(roi)
+        self.stitching_thread = StitchingThread(
+            len(self.cameras), roi, detection=self.config.get("detection"))
         self.stitching_thread.stitched_signal.connect(self.update_stitched_image)
         self.stitching_thread.start()
 
         self.threads = []
-        for idx, cam in enumerate(self.config["cameras"][:2]):
+        for idx, cam in enumerate(self.cameras):
             t = VideoThread(cam["url"], idx)
             t.change_pixmap_signal.connect(self.update_image)
             t.change_pixmap_signal.connect(self.stitching_thread.update_frame)
@@ -204,8 +259,9 @@ class App(QMainWindow):
         self.statusbar.showMessage("监控区域已清除。")
 
     def _recalibrate(self):
-        self.stitching_thread.pipeline.homography = None
-        self.statusbar.showMessage("正在重新校准拼接矩阵…", 4000)
+        self.stitching_thread.pipeline.homographies = None
+        self.statusbar.showMessage(
+            f"正在重新校准 {len(self.cameras)} 路拼接矩阵…", 4000)
 
     def _on_fov_changed(self, value):
         self.fovLabel.setText(f"FOV: {value}°")
@@ -224,7 +280,7 @@ class App(QMainWindow):
 
     def _save_roi(self, roi):
         self.config["region_of_interest"] = roi
-        with open("config.yaml", "w") as f:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             yaml.dump(self.config, f, default_flow_style=None, allow_unicode=True)
 
     def _set_draw_btn(self, active):
@@ -245,8 +301,9 @@ class App(QMainWindow):
 
     @pyqtSlot(np.ndarray, int)
     def update_image(self, cv_img, index):
-        pix = self._to_pixmap(cv_img, self.cam_w, self.cam_h)
-        (self.cam1_label if index == 0 else self.cam2_label).setPixmap(pix)
+        if 0 <= index < len(self.cam_labels):
+            self.cam_labels[index].setPixmap(
+                self._to_pixmap(cv_img, self.cam_w, self.cam_h))
 
     @pyqtSlot(np.ndarray, int)
     def update_stitched_image(self, cv_img, count):

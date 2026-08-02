@@ -55,64 +55,15 @@
      <layout class="QHBoxLayout" name="topRowLayout">
       <property name="spacing"><number>8</number></property>
 
-      <!-- 摄像头 1 -->
+      <!-- 摄像头预览：面板数量由 config.yaml 的 cameras 决定，运行时生成 -->
       <item>
-       <widget class="QFrame" name="cam1Panel">
-        <property name="styleSheet">
-         <string>QFrame { background-color:#1c1f2c; border:1px solid #2a2f45; border-radius:8px; }</string>
-        </property>
-        <layout class="QVBoxLayout" name="cam1Layout">
-         <property name="spacing"><number>0</number></property>
+       <widget class="QWidget" name="camContainer">
+        <layout class="QHBoxLayout" name="camRowLayout">
+         <property name="spacing"><number>8</number></property>
          <property name="leftMargin"><number>0</number></property>
          <property name="topMargin"><number>0</number></property>
          <property name="rightMargin"><number>0</number></property>
-         <property name="bottomMargin"><number>4</number></property>
-         <item>
-          <widget class="QLabel" name="cam1TitleLabel">
-           <property name="text"><string>摄像头 1</string></property>
-           <property name="alignment"><set>Qt::AlignCenter</set></property>
-           <property name="styleSheet">
-            <string>color:#5a6a9a; font-size:10px; font-weight:bold; letter-spacing:1.5px; padding:5px 8px 3px 8px;</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QLabel" name="cam1_label">
-           <property name="alignment"><set>Qt::AlignCenter</set></property>
-           <property name="styleSheet"><string>background:#0c0e14;</string></property>
-          </widget>
-         </item>
-        </layout>
-       </widget>
-      </item>
-
-      <!-- 摄像头 2 -->
-      <item>
-       <widget class="QFrame" name="cam2Panel">
-        <property name="styleSheet">
-         <string>QFrame { background-color:#1c1f2c; border:1px solid #2a2f45; border-radius:8px; }</string>
-        </property>
-        <layout class="QVBoxLayout" name="cam2Layout">
-         <property name="spacing"><number>0</number></property>
-         <property name="leftMargin"><number>0</number></property>
-         <property name="topMargin"><number>0</number></property>
-         <property name="rightMargin"><number>0</number></property>
-         <property name="bottomMargin"><number>4</number></property>
-         <item>
-          <widget class="QLabel" name="cam2TitleLabel">
-           <property name="text"><string>摄像头 2</string></property>
-           <property name="alignment"><set>Qt::AlignCenter</set></property>
-           <property name="styleSheet">
-            <string>color:#5a6a9a; font-size:10px; font-weight:bold; letter-spacing:1.5px; padding:5px 8px 3px 8px;</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QLabel" name="cam2_label">
-           <property name="alignment"><set>Qt::AlignCenter</set></property>
-           <property name="styleSheet"><string>background:#0c0e14;</string></property>
-          </widget>
-         </item>
+         <property name="bottomMargin"><number>0</number></property>
         </layout>
        </widget>
       </item>
@@ -188,7 +139,7 @@
          </item>
          <item>
           <widget class="QLabel" name="fovLabel">
-           <property name="text"><string>FOV: 80°</string></property>
+           <property name="text"><string>FOV: 65°</string></property>
            <property name="alignment"><set>Qt::AlignCenter</set></property>
            <property name="styleSheet">
             <string>color:#5a6a9a; font-size:10px; font-weight:bold; letter-spacing:1px; border:none;</string>
@@ -198,10 +149,12 @@
          <item>
           <widget class="QSlider" name="fovSlider">
            <property name="orientation"><enum>Qt::Horizontal</enum></property>
-           <property name="minimum"><number>0</number></property>
-           <property name="maximum"><number>140</number></property>
-           <property name="value"><number>80</number></property>
-           <property name="toolTip"><string>调整相机视场角(FOV)以改善畸变</string></property>
+           <!-- 40~110：低于 40 单应链发散，高于 110 柱面输出宽度过窄、分辨率不足以匹配。
+                （上限曾因柱面参数化错误而只能到 100，修正采样后已放宽。） -->
+           <property name="minimum"><number>40</number></property>
+           <property name="maximum"><number>110</number></property>
+           <property name="value"><number>65</number></property>
+           <property name="toolTip"><string>调整相机视场角(FOV)以改善畸变；过小会使拼接发散，过大会导致匹配失败</string></property>
           </widget>
          </item>
          <item>

@@ -12,3 +12,8 @@ kornia>=0.6.11
 setuptools
 tqdm
 pytlsd @ git+https://github.com/iago-suarez/pytlsd.git@4180ab8990ae68cc9c8797c63aa1dc47b2c714da
+# 目标检测（video_stitching）：RF-DETR，权重自动缓存到 ~/.roboflow/models
+rfdetr>=1.8
+supervision>=0.29
+PyQt5>=5.15
+PyYAML
